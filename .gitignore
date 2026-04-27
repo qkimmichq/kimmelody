@@ -1,0 +1,9 @@
+node_modules/
+.env
+*.db
+data/netease_cookie.txt
+cache/
+.claude/
+.playwright-mcp/
+*.log
+.DS_Store

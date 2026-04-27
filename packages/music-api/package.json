@@ -1,0 +1,10 @@
+{
+  "name": "@kimmelody/music-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.js",
+  "dependencies": {
+    "NeteaseCloudMusicApi": "^4.31.0"
+  }
+}

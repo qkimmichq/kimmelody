@@ -1,0 +1,19 @@
+{
+  "name": "kimmelody",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI 音乐电台 Agent — 个人专属音乐电台",
+  "workspaces": [
+    "packages/server",
+    "packages/web",
+    "packages/music-api"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=packages/server",
+    "start": "npm run start --workspace=packages/server",
+    "bootstrap": "node scripts/bootstrap.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.91.1"
+  }
+}
