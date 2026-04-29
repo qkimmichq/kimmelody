@@ -40,6 +40,12 @@ class KimmelodyApp {
     this._audioInitAttempted = false;
     this._typingEl = null;
 
+    // MV 状态
+    this._mvActive = false;
+    this._mvInfo = null;       // { mvId, detail, songId }
+    this._mvChecking = false;
+    this._mvWasPlaying = undefined;
+
     this._cacheDOM();
     this._bindEvents();
     this._connectWS();
@@ -82,6 +88,15 @@ class KimmelodyApp {
     this.nextBtn = this.$('#nextBtn');
     this.prevBtn = this.$('#prevBtn');
     this.radioPlayerCol = this.$('.radio-player-col');
+
+    // MV 相关
+    this.mvBadge = this.$('#mvBadge');
+    this.mvVideo = this.$('#mvVideo');
+    this.mvLoading = this.$('#mvLoading');
+    this.mvControls = this.$('#mvControls');
+    this.mvCloseBtn = this.$('#mvCloseBtn');
+    this.mvFullscreenBtn = this.$('#mvFullscreenBtn');
+    this.albumContainerEl = this.$('#albumContainer');
 
     // 推荐
     this.recommendContent = this.$('#recommendContent');
@@ -229,6 +244,19 @@ class KimmelodyApp {
         }
       });
     });
+
+    // MV 按钮
+    this.mvBadge?.addEventListener('click', (e) => { e.stopPropagation(); this._enterMv(); });
+    this.mvCloseBtn?.addEventListener('click', () => this._closeMv());
+    this.mvFullscreenBtn?.addEventListener('click', () => this._toggleMvFullscreen());
+    this.mvVideo?.addEventListener('error', () => {
+      this._toast('MV 加载失败');
+      this._closeMv();
+    });
+    this.mvVideo?.addEventListener('loadeddata', () => {
+      if (this.mvLoading) this.mvLoading.style.display = 'none';
+    });
+    this.mvVideo?.addEventListener('ended', () => this._closeMv());
   }
 
   // ── WebSocket ──
@@ -411,6 +439,8 @@ class KimmelodyApp {
 
     // 启动 DJ 故事计时器：播放 25 秒后自动讲述歌曲趣事
     this._scheduleSongStory(song);
+    // 异步检测 MV 可用性
+    this._checkMvAvailability(song);
     return true;
   }
 
@@ -467,21 +497,19 @@ class KimmelodyApp {
   }
 
   _primeAudio() {
-    // Unlock the audio element for future programmatic play() calls.
-    // Must be called synchronously within a user-gesture handler (click/keydown).
+    // Only prime when audio element has no real source loaded.
+    // If a song is already loaded, play/pause/rewind would destroy
+    // the current playback position (currentTime → 0).
     if (!this.audio) return;
-    const prevSrc = this.audio.src;
-    // If audio has no src, use a minimal silent WAV so play() actually succeeds
-    // and registers the user gesture activation with the browser.
-    if (!prevSrc) {
-      this.audio.src = 'data:audio/wav;base64,UklGRnoAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YVoAAABBTF9TRUNUSU9OTEVOR1RIDQAAADIy';
-    }
+    if (this.audio.src) return;
+
+    this.audio.src = 'data:audio/wav;base64,UklGRnoAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YVoAAABBTF9TRUNUSU9OTEVOR1RIDQAAADIy';
     this.audio.play().then(() => {
       this.audio.pause();
       this.audio.currentTime = 0;
-      if (!prevSrc) this.audio.removeAttribute('src');
+      this.audio.removeAttribute('src');
     }).catch(() => {
-      if (!prevSrc) this.audio.removeAttribute('src');
+      this.audio.removeAttribute('src');
     });
   }
 
@@ -526,6 +554,11 @@ class KimmelodyApp {
   _updateNowPlayingUI(data) {
     const song = data.currentSong;
     if (!song) return;
+
+    // 切歌时关闭 MV 并重置
+    if (this._mvActive) this._closeMv();
+    this._hideMvBadge();
+    this._mvInfo = null;
 
     // Update radio player bar (left)
     this.radioSongTitle.textContent = song.title || '未知歌曲';
@@ -649,7 +682,12 @@ class KimmelodyApp {
       }
     }
 
-    // Fallback: fetch from server
+    // Queue exhausted → AI DJ 自动推荐下一批歌曲
+    if (this.state.currentIndex >= this.state.songs.length - 1) {
+      return this._autoDJNext();
+    }
+
+    // Has more songs in queue but preload failed → server fallback
     const data = await this._api('POST', '/api/command', { text: '下一首' });
     if (data?.payload?.currentSong?.url) {
       this.state.songs = data.payload.songs || this.state.songs;
@@ -657,6 +695,49 @@ class KimmelodyApp {
       await this._playSong(data.payload.currentSong, this.state.songs, this.state.currentIndex);
     } else {
       this._sendCommand('下一首');
+    }
+  }
+
+  // ── 队列播完后 DJ 自动推荐 ──
+  async _autoDJNext() {
+    this._toast('DJ 正在为你挑选下一首歌...');
+    const recentHistory = this.state.songs.slice(-5).map(s => `${s.title} - ${s.artist}`).join('、');
+
+    try {
+      const messages = [
+        ...this.state.chatHistory.slice(-10),
+        {
+          role: 'user',
+          content: `【自动续播】刚才播了：${recentHistory || '无'}。这些歌已经播完了，请为我推荐接下来适合听的2-3首歌。你可以简单聊一下推荐原因，控制在2-3句话内。`,
+        },
+      ];
+
+      const response = await fetch(`${API_BASE}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages }),
+      });
+      const data = await response.json();
+
+      // 显示 DJ 消息
+      if (data.reply) {
+        this.state.chatHistory.push({
+          role: 'assistant',
+          content: data.reply,
+          songs: data.songs || [],
+          mood: data.mood || 'neutral',
+        });
+        this._renderAIMessage(data.reply, data.songs || []);
+      }
+
+      // 播放推荐的第一首歌
+      if (data.songs && data.songs.length > 0) {
+        const first = data.songs[0];
+        await this._playSong(first, data.songs, 0);
+      }
+    } catch (err) {
+      console.warn('[AutoDJ] 推荐失败:', err.message);
+      // 静默失败，用户可以手动操作
     }
   }
 
@@ -1098,7 +1179,7 @@ class KimmelodyApp {
     aiDiv.className = 'chat-message ai';
     const avatar = document.createElement('div');
     avatar.className = 'chat-avatar ai';
-    avatar.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" width="16" height="16"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" stroke-width="1.5"/><path d="M19 10v2a7 7 0 0 1-14 0v-2" stroke-width="1.5" stroke-linecap="round"/></svg>';
+    avatar.innerHTML = '<img src="/ai.png" alt="DJ" width="28" height="28" style="border-radius:50%;object-fit:cover">';
     const contentWrap = document.createElement('div');
     contentWrap.style.flex = '1';
     const bubble = document.createElement('div');
@@ -1243,9 +1324,9 @@ class KimmelodyApp {
     const avatar = document.createElement('div');
     avatar.className = `chat-avatar ${role}`;
     if (role === 'ai') {
-      avatar.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" width="16" height="16"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" stroke-width="1.5"/><path d="M19 10v2a7 7 0 0 1-14 0v-2" stroke-width="1.5" stroke-linecap="round"/></svg>';
+      avatar.innerHTML = '<img src="/ai.png" alt="DJ" width="28" height="28" style="border-radius:50%;object-fit:cover">';
     } else {
-      avatar.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" width="16" height="16"><circle cx="12" cy="8" r="4" stroke-width="1.5"/><path d="M4 21c0-4 3.5-7 8-7s8 3 8 7" stroke-width="1.5" stroke-linecap="round"/></svg>';
+      avatar.innerHTML = '<img src="/user.png" alt="我" width="28" height="28" style="border-radius:50%;object-fit:cover">';
     }
 
     const bubble = document.createElement('div');
@@ -1264,7 +1345,7 @@ class KimmelodyApp {
 
     const avatar = document.createElement('div');
     avatar.className = 'chat-avatar ai';
-    avatar.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" width="16" height="16"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" stroke-width="1.5"/><path d="M19 10v2a7 7 0 0 1-14 0v-2" stroke-width="1.5" stroke-linecap="round"/></svg>';
+    avatar.innerHTML = '<img src="/ai.png" alt="DJ" width="28" height="28" style="border-radius:50%;object-fit:cover">';
 
     const content = document.createElement('div');
     content.style.flex = '1';
@@ -1349,7 +1430,7 @@ class KimmelodyApp {
 
     const avatar = document.createElement('div');
     avatar.className = 'chat-avatar ai';
-    avatar.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" width="16" height="16"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" stroke-width="1.5"/><path d="M19 10v2a7 7 0 0 1-14 0v-2" stroke-width="1.5" stroke-linecap="round"/></svg>';
+    avatar.innerHTML = '<img src="/ai.png" alt="DJ" width="28" height="28" style="border-radius:50%;object-fit:cover">';
 
     const bubble = document.createElement('div');
     bubble.className = 'chat-bubble ai chat-typing';
@@ -1407,20 +1488,67 @@ class KimmelodyApp {
     return result;
   }
 
-  // 歌曲播放 25 秒后自动请求 DJ 讲故事
+  // DJ 主动聊天 — 一首歌里触发多次，而不是只讲一次故事
   _scheduleSongStory(song) {
-    this._clearStoryTimer();
+    this._clearStoryTimers();
     if (!song || !song.title || !song.artist) return;
 
-    this._storyTimer = setTimeout(() => {
-      this._fetchSongStory(song.title, song.artist);
-    }, 25000);
+    const duration = (song.duration && song.duration > 0) ? song.duration : null;
+
+    // 三种聊天类型
+    const rounds = [
+      { label: 'story', delay: duration ? Math.min(30, duration * 0.25) : 30 },
+      { label: 'chat',   delay: duration ? duration * 0.55 : 100 },
+      { label: 'story',  delay: duration ? duration * 0.78 : 180 },
+    ];
+
+    this._storyTimers = rounds.map(r => {
+      return setTimeout(() => {
+        if (r.label === 'chat') {
+          this._djCasualChat(song);
+        } else {
+          this._fetchSongStory(song.title, song.artist);
+        }
+      }, r.delay * 1000);
+    });
   }
 
-  _clearStoryTimer() {
-    if (this._storyTimer) {
-      clearTimeout(this._storyTimer);
-      this._storyTimer = null;
+  _clearStoryTimers() {
+    if (this._storyTimers) {
+      this._storyTimers.forEach(t => clearTimeout(t));
+      this._storyTimers = null;
+    }
+  }
+
+  // DJ 主动发起轻松聊天（不限于歌曲故事，更像真人 DJ 互动）
+  async _djCasualChat(song) {
+    try {
+      const messages = [
+        ...this.state.chatHistory.slice(-8),
+        {
+          role: 'user',
+          content: `【自动互动】你正在播放《${song.title}》- ${song.artist}。请用1-2句话和听众轻松互动一下——可以是问问心情、聊聊这首歌的感觉、或者分享一个小趣事。不需要推荐新歌（songs 设为空数组），只要自然聊天就好。`,
+        },
+      ];
+
+      const response = await fetch(`${API_BASE}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages }),
+      });
+      const data = await response.json();
+      const text = data?.reply || '';
+      if (text) {
+        this.state.chatHistory.push({
+          role: 'assistant',
+          content: text,
+          songs: [],
+          mood: this.state.lastMood || 'neutral',
+        });
+        this._renderAIMessage(text, []);
+      }
+    } catch (err) {
+      // 静默失败，不打扰用户听歌
     }
   }
 
@@ -1603,6 +1731,137 @@ class KimmelodyApp {
     moods.forEach(m => this.radioView.classList.remove(`chat-mood-${m}`));
     if (moods.includes(mood)) {
       this.radioView.classList.add(`chat-mood-${mood}`);
+    }
+  }
+
+  // ══════════════════════════════════════════
+  //  MV Player
+  // ══════════════════════════════════════════
+
+  async _checkMvAvailability(song) {
+    if (this._mvChecking || !song?.id) return;
+    this._mvChecking = true;
+    try {
+      const data = await this._api('GET', `/api/mv/${song.id}`);
+      if (data?.hasMv) {
+        this._mvInfo = { mvId: data.mvId, detail: data.detail, songId: song.id };
+        this._showMvBadge();
+      }
+    } catch {
+      // 静默
+    } finally {
+      this._mvChecking = false;
+    }
+  }
+
+  _showMvBadge() {
+    if (this.mvBadge) this.mvBadge.style.display = 'flex';
+  }
+
+  _hideMvBadge() {
+    if (this.mvBadge) this.mvBadge.style.display = 'none';
+  }
+
+  async _enterMv() {
+    if (!this._mvInfo?.songId) {
+      this._toast('该 MV 暂时无法播放');
+      return;
+    }
+
+    this._hideMvBadge();
+    if (this.mvLoading) this.mvLoading.style.display = 'flex';
+
+    const currentTime = this.audio.currentTime || 0;
+    // 记录音频原始播放状态，供 _closeMv 恢复用
+    this._mvWasPlaying = this.state.isPlaying;
+
+    this.audio.pause();
+
+    // 每次点击都重新获取新鲜 MV URL（避免缓存的 URL 已过期）
+    let freshUrl = null;
+    try {
+      const data = await this._api('GET', `/api/mv/${this._mvInfo.songId}`);
+      freshUrl = data?.url || null;
+    } catch {
+      // 继续
+    }
+    if (!freshUrl) {
+      this._closeMv();
+      this._toast('MV 暂时无法加载，请稍后重试');
+      return;
+    }
+
+    const proxyUrl = `/api/mv/proxy?url=${encodeURIComponent(freshUrl)}`;
+    this.mvVideo.src = proxyUrl;
+    this.mvVideo.style.display = 'block';
+    // 静音播放绕过浏览器自动播放策略
+    this.mvVideo.muted = true;
+
+    try {
+      await this.mvVideo.play();
+      // play() 成功后再取消静音
+      this.mvVideo.muted = false;
+      // 恢复播放状态
+      if (!this._mvWasPlaying) this.mvVideo.pause();
+      this.mvVideo.currentTime = currentTime;
+
+      this._mvActive = true;
+      this.state.isPlaying = !this.mvVideo.paused;
+      this._syncPlayingUI();
+
+      if (this.mvControls) this.mvControls.style.display = 'flex';
+      if (this.recordDisc) this.recordDisc.classList.remove('visible');
+    } catch (err) {
+      console.warn('[MV] play() rejected:', err.message);
+      this._closeMv();
+      this._toast('MV 播放失败，请重试');
+    }
+  }
+
+  _closeMv() {
+    const currentTime = this.mvVideo.currentTime || 0;
+    // 优先使用 _enterMv 保存的音频原始状态，否则根据视频状态判断
+    const wasPlaying = this._mvWasPlaying !== undefined
+      ? this._mvWasPlaying
+      : !this.mvVideo.paused;
+    this._mvWasPlaying = undefined;
+
+    this.mvVideo.pause();
+    this.mvVideo.muted = false;
+    this.mvVideo.style.display = 'none';
+    this.mvVideo.removeAttribute('src');
+    this.mvLoading.style.display = 'none';
+    this.mvControls.style.display = 'none';
+    this._mvActive = false;
+
+    // 恢复音频
+    if (this.audio.src) {
+      this.audio.currentTime = currentTime;
+      if (wasPlaying) {
+        this.audio.play().then(() => {
+          this.state.isPlaying = true;
+          this._syncPlayingUI();
+        }).catch(() => {
+          this.state.isPlaying = false;
+          this._syncPlayingUI();
+        });
+      } else {
+        this.state.isPlaying = false;
+        this._syncPlayingUI();
+      }
+    }
+
+    // 恢复显示 MV 标签
+    if (this._mvInfo) this._showMvBadge();
+  }
+
+  _toggleMvFullscreen() {
+    if (!this.mvVideo) return;
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    } else {
+      const el = this.mvVideo.parentElement || this.mvVideo;
+      el.requestFullscreen?.().catch(() => {});
     }
   }
 }

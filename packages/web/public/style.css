@@ -39,6 +39,8 @@ html, body {
 .splash.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
 .splash-content { text-align: center; }
 .splash-icon { color: var(--accent); margin-bottom: 16px; animation: pulse-glow 2s ease-in-out infinite; }
+.splash-icon img { border-radius: 50%; display: block; }
+.topbar-logo img { border-radius: 50%; object-fit: cover; flex-shrink: 0; }
 .splash-title { font-size: 28px; font-weight: 700; letter-spacing: -0.5px; }
 .splash-sub { color: var(--text-secondary); margin-top: 4px; font-size: 14px; }
 .splash-loader { display: flex; gap: 8px; justify-content: center; margin-top: 24px; }
@@ -591,8 +593,11 @@ html, body {
 .chat-messages::-webkit-scrollbar-thumb { background: var(--text-muted); border-radius: 3px; }
 
 .chat-message {
-  display: flex; gap: 8px; max-width: 88%;
+  display: flex; gap: 8px; max-width: 88%; min-width: 0;
   animation: chat-fade-in 0.3s ease;
+}
+.chat-message > :not(.chat-avatar) {
+  min-width: 0; overflow: hidden;
 }
 .chat-message.user { align-self: flex-end; flex-direction: row-reverse; }
 @keyframes chat-fade-in {
@@ -603,14 +608,16 @@ html, body {
 .chat-avatar {
   width: 32px; height: 32px; border-radius: 50%;
   flex-shrink: 0; display: flex; align-items: center; justify-content: center;
-  font-size: 14px;
+  font-size: 14px; overflow: hidden;
 }
-.chat-avatar.ai { background: var(--accent); color: white; }
-.chat-avatar.user { background: var(--bg-card); color: var(--text-secondary); }
+.chat-avatar.ai, .chat-avatar.user { background: transparent; color: white; }
+.chat-avatar img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; display: block; }
 
 .chat-bubble {
   padding: 10px 14px; border-radius: 14px;
   font-size: 14px; line-height: 1.6; word-break: break-word;
+  overflow-wrap: break-word; max-width: 100%;
+  overflow-x: hidden;
 }
 .chat-bubble.ai {
   background: var(--bg-card); color: var(--text-primary);
@@ -656,7 +663,7 @@ html, body {
 /* ── Chat Song Cards ── */
 .chat-song-cards {
   display: flex; flex-direction: column; gap: 6px;
-  margin-top: 8px;
+  margin-top: 8px; max-width: 100%; overflow: hidden;
 }
 .chat-song-card {
   display: flex; align-items: center; gap: 10px;
@@ -783,6 +790,57 @@ html, body {
     max-width: 960px;
   }
 }
+
+/* ── MV Player ── */
+.mv-badge {
+  position: absolute; z-index: 5; top: 8px; right: 8px;
+  display: flex; align-items: center; gap: 4px;
+  padding: 4px 10px; border-radius: var(--radius-full);
+  background: rgba(0, 0, 0, 0.65); color: #fff;
+  font-size: 11px; font-weight: 600; font-family: var(--font);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  cursor: pointer; transition: all var(--transition);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.mv-badge:hover { background: rgba(0, 0, 0, 0.85); border-color: rgba(255,255,255,0.3); transform: scale(1.05); }
+.mv-badge svg { flex-shrink: 0; }
+
+.mv-video {
+  position: absolute; z-index: 3; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: cover; border-radius: var(--radius-lg);
+  background: #000;
+}
+
+.mv-loading {
+  position: absolute; z-index: 6; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+  border-radius: var(--radius-lg);
+}
+.mv-spinner {
+  width: 32px; height: 32px; border-radius: 50%;
+  border: 3px solid rgba(255,255,255,0.2);
+  border-top-color: var(--accent);
+  animation: mv-spin 0.8s linear infinite;
+}
+@keyframes mv-spin { to { transform: rotate(360deg); } }
+
+.mv-controls {
+  display: flex; align-items: center; justify-content: center; gap: 16px;
+  width: 100%; margin-bottom: 10px; flex-shrink: 0;
+}
+.mv-ctrl-btn {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 14px; border-radius: var(--radius-full);
+  background: var(--bg-card); color: var(--text-secondary);
+  border: 1px solid rgba(255,255,255,0.08);
+  font-size: 12px; font-family: var(--font); cursor: pointer;
+  transition: all var(--transition);
+}
+.mv-ctrl-btn:hover { background: var(--bg-hover); color: var(--text-primary); border-color: rgba(255,255,255,0.15); }
+.mv-ctrl-btn svg { flex-shrink: 0; }
 
 /* ── Responsive: Mobile player shown only when toggled ── */
 @media (max-width: 767px) {

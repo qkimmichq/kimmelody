@@ -438,6 +438,58 @@ export function createHttpApi({ state, executor, scheduler, router: intentRouter
     }
   });
 
+  // ── MV 查询（根据歌曲 ID 获取 MV 信息和播放地址）──
+  api.get('/mv/:songId', async (req, res) => {
+    const { songId } = req.params;
+    try {
+      const mvId = await music.getSongMvId(songId);
+      if (!mvId) return res.json({ hasMv: false });
+
+      const [detail, url] = await Promise.all([
+        music.getMvDetail(mvId),
+        music.getMvUrl(mvId, 720),
+      ]);
+
+      res.json({
+        hasMv: true,
+        mvId: String(mvId),
+        detail,
+        url,  // 直链（有时效），前端播放时通过代理
+      });
+    } catch (err) {
+      console.error('[API] /mv error:', err.message);
+      res.json({ hasMv: false });
+    }
+  });
+
+  // ── MV 视频代理（绕过防盗链）──
+  api.get('/mv/proxy', async (req, res) => {
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ error: 'url required' });
+
+    try {
+      const response = await fetch(url, {
+        redirect: 'follow',
+        headers: { Referer: 'https://music.163.com' },
+      });
+      if (!response.ok) return res.status(502).json({ error: `upstream ${response.status}` });
+
+      const contentType = response.headers.get('content-type') || 'video/mp4';
+      const contentLength = response.headers.get('content-length');
+      res.set('Content-Type', contentType);
+      if (contentLength) res.set('Content-Length', contentLength);
+      res.set('Accept-Ranges', 'bytes');
+      res.set('Cache-Control', 'public, max-age=3600');
+
+      const { Readable } = await import('stream');
+      const body = Readable.fromWeb(response.body);
+      body.pipe(res);
+    } catch (err) {
+      console.error('[API] /mv/proxy error:', err.message);
+      res.status(502).json({ error: err.message });
+    }
+  });
+
   // ── 音频代理（绕过网易云 CDN CORS 限制）──
   api.get('/audio/proxy', async (req, res) => {
     const { url } = req.query;

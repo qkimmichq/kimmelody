@@ -176,4 +176,48 @@ export class NeteaseMusic {
     const data = await this._fetch('/likelist', { uid });
     return data.ids || [];
   }
+
+  // ════════════════════════════════════════
+  //  MV 相关
+  // ════════════════════════════════════════
+
+  // 从歌曲详情中提取 MV ID（0 表示无 MV）
+  async getSongMvId(songId) {
+    try {
+      const data = await this._fetch('/song/detail', { ids: songId });
+      return data.songs?.[0]?.mv || 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  // 获取 MV 详情
+  async getMvDetail(mvId) {
+    try {
+      const data = await this._fetch('/mv/detail', { mvid: mvId });
+      if (!data.data) return null;
+      const d = data.data;
+      return {
+        id: String(d.id),
+        name: d.name,
+        artistName: d.artistName,
+        cover: d.cover || d.coverUrl || '',
+        duration: d.duration || 0,
+        resolutions: (d.brs || []).map(b => b.br),
+        playCount: d.playCount || 0,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  // 获取 MV 播放地址
+  async getMvUrl(mvId, resolution = 720) {
+    try {
+      const data = await this._fetch('/mv/url', { id: mvId, r: resolution });
+      return data.data?.url || null;
+    } catch {
+      return null;
+    }
+  }
 }

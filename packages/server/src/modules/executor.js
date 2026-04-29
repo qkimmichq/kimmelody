@@ -12,65 +12,45 @@ export class Executor {
   async execute(claudeResponse, scene = 'manual') {
     const { say, play, reason, segue } = claudeResponse;
 
-    // 1. 解析播放队列，逐首获取直链
+    // 1. 解析播放队列，逐首获取直链（优先搜索匹配，不依赖 AI 提供的 ID）
     const songs = [];
     for (const item of play) {
       try {
-        // 先查缓存
-        let url = this.state.getCachedUrl(item.id);
-        let resolvedId = item.id;
+        // 直接使用搜索匹配，然后尝试用 AI 提供的 ID 获取 URL 作为补充
+        const resolved = await this._searchAndResolveSong(item);
 
-        if (!url) {
-          url = await this.music.getSongUrl(resolvedId);
-          if (url) this.state.setCachedUrl(resolvedId, url);
-        }
-
-        // URL 不可用 → 尝试搜索歌名+歌手作为后备
-        if (!url && item.title) {
-          const keywords = `${item.title} ${item.artist || ''}`.trim();
-          const results = await this.music.search(keywords, 3);
-          const found = results[0]; // 取第一个搜索结果
-          if (found) {
-            resolvedId = found.id;
-            url = await this.music.getSongUrl(resolvedId);
-            if (url) {
-              this.state.setCachedUrl(resolvedId, url);
-              console.log(`[Executor] 后备搜索命中: ${found.title} - ${found.artist}`);
-            }
+        if (resolved) {
+          // 获取歌词
+          let lyric = null;
+          try {
+            const cached = this.state.getCachedLyric(resolved.id);
+            lyric = cached || await this.music.getLyric(resolved.id);
+            if (!cached && lyric) this.state.setCachedLyric(resolved.id, lyric);
+          } catch {
+            lyric = { lrc: '', tlrc: '' };
           }
-        }
 
-        if (!url) {
-          console.warn(`[Executor] 跳过无播放地址的歌曲: ${item.title || item.id}`);
-          continue;
-        }
+          // 获取更多详情（album 等）
+          let detail = null;
+          try {
+            detail = await this.music.getSongDetail(resolved.id);
+          } catch {
+            // fallback to resolved data
+          }
 
-        let detail = null;
-        try {
-          detail = await this.music.getSongDetail(resolvedId);
-        } catch {
-          detail = { id: resolvedId, title: item.title, artist: item.artist, album: '', cover: '', duration: 0 };
+          songs.push({
+            id: resolved.id,
+            title: detail?.title || resolved.title || item.title || '未知歌曲',
+            artist: detail?.artist || resolved.artist || item.artist || '未知歌手',
+            album: detail?.album || '',
+            cover: detail?.cover || resolved.cover || '',
+            duration: detail?.duration || resolved.duration || 0,
+            url: resolved.url,
+            lyric,
+          });
+        } else {
+          console.warn(`[Executor] 未找到可播放版本: ${item.title || item.id}`);
         }
-
-        let lyric = null;
-        try {
-          const cached = this.state.getCachedLyric(resolvedId);
-          lyric = cached || await this.music.getLyric(resolvedId);
-          if (!cached && lyric) this.state.setCachedLyric(resolvedId, lyric);
-        } catch {
-          lyric = { lrc: '', tlrc: '' };
-        }
-
-        songs.push({
-          id: detail.id,
-          title: detail.title || item.title || '未知歌曲',
-          artist: detail.artist || item.artist || '未知歌手',
-          album: detail.album || '',
-          cover: detail.cover || '',
-          duration: detail.duration || 0,
-          url,
-          lyric,
-        });
       } catch (err) {
         console.warn(`[Executor] 跳过歌曲 ${item.id || item.title}: ${err.message}`);
       }
@@ -142,40 +122,87 @@ export class Executor {
     return { songs, ttsUrl: ttsResult?.url || null };
   }
 
+  // ── 歌手名模糊匹配 ──
+  _artistMatch(requested, candidate) {
+    if (!requested || !candidate) return false;
+    const r = requested.toLowerCase().replace(/\s+/g, '');
+    const c = candidate.toLowerCase().replace(/\s+/g, '');
+    if (r === c) return true;
+    // 处理 "林忆莲" vs "林忆莲、李宗盛" 这种多歌手情况
+    if (c.includes(r) || r.includes(c)) return true;
+    // 处理英文艺名 vs 本名，如 "JJ Lin" vs "林俊杰"
+    const rParts = r.split(/[,，/、&]/);
+    const cParts = c.split(/[,，/、&]/);
+    return rParts.some(rp => cParts.some(cp => cp.trim() === rp.trim()));
+  }
+
+  // ── 通过搜索匹配最合适的歌曲（不依赖 AI 提供的 ID） ──
+  async _searchAndResolveSong(item) {
+    const searchKeyword = `${item.title || ''} ${item.artist || ''}`.trim();
+    if (!searchKeyword) return null;
+
+    const results = await this.music.search(searchKeyword, 5);
+    if (results.length === 0) return null;
+
+    // 第一优先：歌手名精确匹配
+    let match = results.find(r => this._artistMatch(item.artist, r.artist));
+    // 第二优先：歌名包含匹配
+    if (!match && item.title) {
+      const t = item.title.toLowerCase();
+      match = results.find(r => r.title.toLowerCase().includes(t) || t.includes(r.title.toLowerCase()));
+    }
+    // 第三优先：取第一个结果（至少是同一搜索关键词的结果）
+    if (!match) match = results[0];
+
+    // 如果匹配的歌手不一致，记录警告
+    if (item.artist && !this._artistMatch(item.artist, match.artist)) {
+      console.log(`[Executor] 歌手不匹配: 请求="${item.artist}" 结果="${match.artist}"，仍使用搜索结果`);
+    }
+
+    let url = this.state.getCachedUrl(match.id);
+    if (!url) {
+      url = await this.music.getSongUrl(match.id);
+      if (url) this.state.setCachedUrl(match.id, url);
+    }
+    if (!url) return null;
+
+    const detail = await this.music.getSongDetail(match.id).catch(() => ({
+      id: match.id, title: match.title, artist: match.artist, cover: '', duration: 0,
+    }));
+
+    // 异步获取 MV 信息（不阻塞播放）
+    let mvId = 0;
+    try {
+      mvId = await this.music.getSongMvId(match.id);
+    } catch { /* 静默 */ }
+
+    return {
+      id: detail.id || match.id,
+      title: detail.title || match.title,
+      artist: detail.artist || match.artist,
+      cover: detail.cover || match.cover || '',
+      duration: detail.duration || 0,
+      url,
+      reason: item.reason || '',
+      mvId: mvId || undefined,
+    };
+  }
+
   // ── Chat 歌曲解析（轻量版） ──
   async resolveChatSongs(songs) {
     const resolved = [];
     for (const item of (songs || []).slice(0, 3)) {
       try {
-        let url = this.state.getCachedUrl(item.id);
-        if (!url) {
-          url = await this.music.getSongUrl(item.id);
-          if (url) this.state.setCachedUrl(item.id, url);
+        // 直接搜索匹配，不依赖 AI 提供的 ID
+        const song = await this._searchAndResolveSong(item);
+        if (song) {
+          resolved.push(song);
+          console.log(`[Chat] 歌曲解析: "${item.title} - ${item.artist}" → "${song.title} - ${song.artist}"`);
+        } else {
+          console.warn(`[Chat] 未找到可播放版本: "${item.title} - ${item.artist}"`);
         }
-        if (!url && item.title) {
-          const results = await this.music.search(`${item.title} ${item.artist || ''}`, 3);
-          if (results[0]) {
-            url = await this.music.getSongUrl(results[0].id);
-            if (url) this.state.setCachedUrl(results[0].id, url);
-          }
-        }
-        if (!url) continue;
-
-        const detail = await this.music.getSongDetail(item.id).catch(() => ({
-          id: item.id, title: item.title, artist: item.artist, cover: '', duration: 0,
-        }));
-
-        resolved.push({
-          id: detail.id,
-          title: detail.title || item.title,
-          artist: detail.artist || item.artist,
-          cover: detail.cover || '',
-          duration: detail.duration || 0,
-          url,
-          reason: item.reason || '',
-        });
       } catch (err) {
-        console.warn(`[Chat] 跳过歌曲 ${item.id}: ${err.message}`);
+        console.warn(`[Chat] 跳过歌曲: ${err.message}`);
       }
     }
     return resolved;

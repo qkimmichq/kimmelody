@@ -2,20 +2,20 @@ import Anthropic from '@anthropic-ai/sdk';
 
 const RESPONSE_FORMAT = {
   say: '播报文案',
-  play: [{ id: '歌曲ID', title: '歌名', artist: '歌手' }],
+  play: [{ title: '歌名', artist: '歌手' }],
   reason: '选曲理由',
   segue: '歌曲间过渡语（可选）',
 };
 
 const CHAT_RESPONSE_FORMAT = {
-  reply: '你的自然语言回复（2-4句话）',
-  songs: [{ id: '网易云歌曲ID', title: '歌名', artist: '歌手', reason: '推荐理由' }],
-  tts_text: '可选的简短播报用于TTS合成（1-2句，可选）',
+  reply: '你的自然语言回复',
+  songs: [{ title: '歌名', artist: '歌手', reason: '推荐理由（含故事/趣事/背景）' }],
+  tts_text: '可选的简短播报用于TTS合成（可选）',
 };
 
 const SYSTEM_PROMPT = '你叫 Kimmelody，是一个有品位的 AI 音乐电台 DJ。你根据用户输入、场景信息、音乐品味来规划播放列表。只回复 JSON，不要 markdown 包裹。';
 
-const CHAT_SYSTEM_PROMPT = '严格按照用户提示中的 DJ 人设进行回复。只输出 JSON，不要 markdown 包裹。';
+const CHAT_SYSTEM_PROMPT = '你是 Kimmelody FM 的专属 AI 音乐电台 DJ。请严格按照用户提示中的 DJ 人设进行回复——主动、有温度、有音乐知识。只输出 JSON，不要 markdown 包裹。';
 
 const SEGUE_SYSTEM_PROMPT = '你是一个音乐电台 DJ。请为两首歌之间生成 1-2 句有趣的过渡语。自然、简短、像真人 DJ 说话。只输出过渡文本，不要任何标记。';
 
