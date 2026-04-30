@@ -87,11 +87,13 @@ export function createHttpApi({ state, executor, scheduler, router: intentRouter
         });
       }
 
-      // 可选 TTS
+      // 可选 TTS：优先用 tts_text，否则 reply 短文本也合成
       let ttsUrl = null;
-      if (response.tts_text) {
-        const ttsResult = await tts?.synthesize(response.tts_text, 'chat').catch(() => null);
-        if (ttsResult) ttsUrl = ttsResult.url;
+      let ttsWords = [];
+      const ttsText = response.tts_text || response.reply || '';
+      if (tts && ttsText) {
+        const ttsResult = await tts.synthesize(ttsText, 'chat', { cache: false }).catch(() => null);
+        if (ttsResult) { ttsUrl = ttsResult.url; ttsWords = ttsResult.words || []; }
       }
 
       return res.json({
@@ -99,6 +101,8 @@ export function createHttpApi({ state, executor, scheduler, router: intentRouter
         songs: resolvedSongs,
         mood: response.mood || 'neutral',
         tts_url: ttsUrl,
+        tts_text: ttsUrl ? ttsText : null,
+        tts_words: ttsWords,
       });
     } catch (err) {
       console.error('[API] /chat error:', err.message);
@@ -166,9 +170,11 @@ export function createHttpApi({ state, executor, scheduler, router: intentRouter
           }
 
           let ttsUrl = null;
-          if (chunk.tts_text) {
-            const ttsResult = await tts?.synthesize(chunk.tts_text, 'chat').catch(() => null);
-            if (ttsResult) ttsUrl = ttsResult.url;
+          let ttsWords = [];
+          const ttsText = chunk.tts_text || chunk.reply || '';
+          if (tts && ttsText) {
+            const ttsResult = await tts.synthesize(ttsText, 'chat', { cache: false }).catch(() => null);
+            if (ttsResult) { ttsUrl = ttsResult.url; ttsWords = ttsResult.words || []; }
           }
 
           send({
@@ -177,6 +183,8 @@ export function createHttpApi({ state, executor, scheduler, router: intentRouter
             songs: resolvedSongs,
             mood: chunk.mood || 'neutral',
             tts_url: ttsUrl,
+            tts_text: ttsUrl ? ttsText : null,
+            tts_words: ttsWords,
           });
         }
       }
@@ -195,7 +203,18 @@ export function createHttpApi({ state, executor, scheduler, router: intentRouter
 
     try {
       const story = await claude.generateSongStory(title, artist);
-      res.json({ story: story || `正在播放 ${artist} 的《${title}》，好好享受音乐吧~` });
+      const response = { story: story || `正在播放 ${artist} 的《${title}》，好好享受音乐吧~` };
+
+      if (tts && story) {
+        const ttsResult = await tts.synthesize(story, 'discovery', { cache: false }).catch(() => null);
+        if (ttsResult) {
+          response.tts_url = ttsResult.url;
+          response.tts_text = story;
+          response.tts_words = ttsResult.words || [];
+        }
+      }
+
+      res.json(response);
     } catch (err) {
       console.error('[API] /song/story error:', err.message);
       res.json({ story: '' });

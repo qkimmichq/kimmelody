@@ -14,6 +14,8 @@
     "bootstrap": "node scripts/bootstrap.js"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.91.1"
+    "@anthropic-ai/sdk": "^0.91.1",
+    "edge-tts": "^1.0.1",
+    "node-edge-tts": "^1.2.10"
   }
 }

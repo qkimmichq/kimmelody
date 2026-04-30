@@ -24,7 +24,7 @@ const STATE_DB_PATH = process.env.STATE_DB_PATH || path.resolve(__dirname, '../.
 const TASTE_PATH = process.env.TASTE_PATH || path.resolve(__dirname, '../../data/taste.md');
 const ROUTINES_PATH = process.env.ROUTINES_PATH || path.resolve(__dirname, '../../data/routines.md');
 const DJ_PERSONA_PATH = process.env.DJ_PERSONA_PATH || path.resolve(__dirname, '../../data/dj-persona.md');
-const TTS_CACHE_DIR = process.env.TTS_CACHE_DIR || path.resolve(__dirname, '../../cache/tts');
+const TTS_CACHE_DIR = process.env.TTS_CACHE_DIR || path.resolve(process.cwd(), 'cache/tts');
 const WEB_DIR = process.env.WEB_DIR || path.resolve(__dirname, '../../web/public');
 
 async function main() {
@@ -118,10 +118,10 @@ async function main() {
   }));
 
   // 9. 静态文件服务
-  app.use('/tts', express.static(path.resolve(__dirname, '../../cache/tts')));
+  app.use('/tts', express.static(TTS_CACHE_DIR));
   app.use(express.static(WEB_DIR));
-  app.get('*', (req, res) => {
-    if (req.path.startsWith('/api') || req.path.startsWith('/tts')) return;
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api') || req.path.startsWith('/tts')) return next();
     res.sendFile(path.join(WEB_DIR, 'index.html'));
   });
 

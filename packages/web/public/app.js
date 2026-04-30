@@ -47,6 +47,7 @@ class KimmelodyApp {
     this._mvWasPlaying = undefined;
 
     this._cacheDOM();
+    this._initBgCanvas();
     this._bindEvents();
     this._connectWS();
     this._fetchInitialState();
@@ -70,6 +71,7 @@ class KimmelodyApp {
     this.radioPlayIcon = this.$('#radioPlayIcon');
     this.radioNextBtn = this.$('#radioNextBtn');
     this.waveCanvas = this.$('#waveCanvas');
+    this.bgCanvas = this.$('#bgCanvas');
     this.chatMessages = this.$('#chatMessages');
     this.chatInput = this.$('#chatInput');
     this.chatSendBtn = this.$('#chatSendBtn');
@@ -321,6 +323,10 @@ class KimmelodyApp {
         this.state.queue = payload || [];
         this._renderQueue();
         break;
+      case 'tts:ready':
+        if (payload.ttsUrl) this._playDJVoice(payload.ttsUrl);
+        if (payload.segueTtsUrl) this._segueTtsUrl = payload.segueTtsUrl;
+        break;
       case 'connected':
         console.log('[WS]', payload?.message);
         break;
@@ -548,6 +554,11 @@ class KimmelodyApp {
     // Show broadcast if any (dedup by last text)
     if (payload.sayText) {
       this._showBroadcast(payload.sayText);
+    }
+
+    // Auto-play DJ voice announcement
+    if (payload.ttsUrl) {
+      this._playDJVoice(payload.ttsUrl);
     }
   }
 
@@ -1170,6 +1181,9 @@ class KimmelodyApp {
     this.chatSendBtn.disabled = true;
     this.state.chatSending = true;
 
+    // Unlock audio for TTS autoplay after async SSE delay
+    this._unlockAudio();
+
     // 1. Add user message to chat
     this.state.chatHistory.push({ role: 'user', content: text });
     this._renderChatMessage(text, 'user');
@@ -1207,14 +1221,7 @@ class KimmelodyApp {
       const decoder = new TextDecoder();
       let sseBuffer = '';
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        sseBuffer += decoder.decode(value, { stream: true });
-        const lines = sseBuffer.split('\n');
-        sseBuffer = lines.pop() || '';
-
+      const processLines = (lines) => {
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue;
           const jsonStr = line.slice(6);
@@ -1223,7 +1230,6 @@ class KimmelodyApp {
 
             if (data.type === 'text') {
               fullRaw += data.text;
-              // 从 JSON 中实时提取 reply 文本，不显示 JSON 结构
               const displayText = this._extractReplyFromJSON(fullRaw);
               if (displayText) {
                 bubble.textContent = displayText;
@@ -1241,18 +1247,15 @@ class KimmelodyApp {
                 mood: data.mood || 'neutral',
               });
 
-              // Render song cards
               if (data.songs && data.songs.length > 0) {
                 this._appendSongCards(contentWrap, data.songs);
               }
 
-              // Update mood
               if (data.mood && data.mood !== this.state.lastMood) {
                 this.state.lastMood = data.mood;
                 this._updateMoodVisual(data.mood);
               }
 
-              // Auto-play TTS
               if (data.tts_url) {
                 this._playChatTTS(data.tts_url);
               }
@@ -1262,6 +1265,21 @@ class KimmelodyApp {
             }
           } catch { /* skip unparseable lines */ }
         }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        sseBuffer += decoder.decode(value, { stream: true });
+        const lines = sseBuffer.split('\n');
+        sseBuffer = lines.pop() || '';
+        processLines(lines);
+      }
+
+      // Flush remaining buffer after stream ends
+      if (sseBuffer.trim()) {
+        processLines(sseBuffer.split('\n'));
       }
     } catch (err) {
       bubble.textContent = '网络出了点问题，能再试一次吗？';
@@ -1415,11 +1433,50 @@ class KimmelodyApp {
     }
   }
 
+  // 统一的 TTS 播放：压低音乐音量 → 播放语音 → 恢复音量
+  _unlockAudio() {
+    if (this._audioUnlocked) return;
+    this._audioUnlocked = true;
+    try {
+      const a = new Audio();
+      a.volume = 0.001;
+      a.play().then(() => { a.pause(); a.remove(); }).catch(() => {});
+    } catch {}
+  }
+
+  _playDJVoice(url, volume = 0.7) {
+    if (!url) return;
+
+    const prevVolume = this.audio.volume;
+    const duckVolume = Math.max(0.1, prevVolume * 0.3);
+
+    this.audio.volume = duckVolume;
+
+    const ttsAudio = new Audio(url);
+    ttsAudio.volume = volume;
+    ttsAudio.play().catch(() => {
+      this.audio.volume = prevVolume;
+    });
+
+    ttsAudio.addEventListener('ended', () => {
+      this.audio.volume = prevVolume;
+    });
+
+    ttsAudio.addEventListener('error', () => {
+      this.audio.volume = prevVolume;
+    });
+
+    // 超时保护：最多 30 秒后强制恢复
+    setTimeout(() => {
+      if (!ttsAudio.ended && !ttsAudio.paused) {
+        this.audio.volume = prevVolume;
+      }
+    }, 30000);
+  }
+
   _playChatTTS(url) {
     if (!url) return;
-    const ttsAudio = new Audio(url);
-    ttsAudio.volume = 0.6;
-    ttsAudio.play().catch(() => {});
+    this._playDJVoice(url, 0.6);
   }
 
   _showTypingIndicator() {
@@ -1546,6 +1603,10 @@ class KimmelodyApp {
           mood: this.state.lastMood || 'neutral',
         });
         this._renderAIMessage(text, []);
+
+        if (data.tts_url) {
+          this._playDJVoice(data.tts_url, 0.65);
+        }
       }
     } catch (err) {
       // 静默失败，不打扰用户听歌
@@ -1563,6 +1624,10 @@ class KimmelodyApp {
           mood: this.state.lastMood || 'neutral',
         });
         this._renderAIMessage(data.story, []);
+
+        if (data.tts_url) {
+          this._playDJVoice(data.tts_url, 0.65);
+        }
       }
     } catch (err) {
       console.warn('[Story] fetch error:', err.message);
@@ -1625,6 +1690,332 @@ class KimmelodyApp {
     }
   }
 
+  // ══════════════════════════════════════════
+  //  Dynamic Audio Background (Image + Aurora + Particles)
+  // ══════════════════════════════════════════
+
+  _initBgCanvas() {
+    if (!this.bgCanvas) return;
+    this._bgCtx = this.bgCanvas.getContext('2d');
+    this._bgParticles = [];
+    this._bgImage = null;
+    this._bgImages = [];
+    this._bgImageIndex = -1;
+    this._bgPrevImage = null;
+    this._bgFadeAlpha = 1;
+    this._bgInterval = 60; // 轮播间隔（秒）
+    this._bgTimer = null;
+    this._bgMoodMap = {
+      energetic: 0, calm: 1, happy: 2, melancholic: 3,
+      focused: 0, nostalgic: 3,
+    };
+    this._resizeBgCanvas();
+    window.addEventListener('resize', () => this._resizeBgCanvas());
+    this._loadBgImages(['/bg1.png', '/bg2.png', '/bg3.png', '/bg4.png']);
+    this._startBgRenderLoop(); // 独立渲染循环，无需等待音频初始化
+  }
+
+  _startBgRenderLoop() {
+    if (this._bgRenderId) cancelAnimationFrame(this._bgRenderId);
+    const draw = () => {
+      this._bgRenderId = requestAnimationFrame(draw);
+      if (!this._bgCtx || this._mvActive) return;
+      if (this._audioCtxReady && this.state.isPlaying && this._analyser) {
+        this._drawBgActive();
+      } else {
+        this._drawBgIdle();
+      }
+    };
+    draw();
+  }
+
+  _loadBgImages(paths) {
+    this._bgImages = new Array(paths.length).fill(null);
+    let loaded = 0;
+    paths.forEach((path, i) => {
+      const img = new Image();
+      img.onload = () => {
+        this._bgImages[i] = img;
+        loaded++;
+        if (loaded === 1) {
+          this._bgImageIndex = 0;
+          this._bgImage = img;
+          this._bgImageDrawn = false;
+          this._startBgRotation();
+        }
+      };
+      img.onerror = () => console.warn(`[BG] 背景图加载失败: ${path}`);
+      img.src = path;
+    });
+  }
+
+  _startBgRotation() {
+    this._stopBgRotation();
+    this._bgTimer = setInterval(() => {
+      const next = (this._bgImageIndex + 1) % this._bgImages.length;
+      this._switchBg(next);
+    }, this._bgInterval * 1000);
+  }
+
+  _stopBgRotation() {
+    if (this._bgTimer) { clearInterval(this._bgTimer); this._bgTimer = null; }
+  }
+
+  _switchBg(index) {
+    if (index === this._bgImageIndex) return;
+    const img = this._bgImages[index];
+    if (!img) return;
+    this._bgPrevImage = this._bgImage;
+    if (this._bgPrevImage) {
+      this._bgPrevDrawX = this._bgDrawX;
+      this._bgPrevDrawY = this._bgDrawY;
+      this._bgPrevDrawW = this._bgDrawW;
+      this._bgPrevDrawH = this._bgDrawH;
+    }
+    this._bgImage = img;
+    this._bgImageIndex = index;
+    this._bgImageDrawn = false;
+    this._bgFadeAlpha = 0;
+  }
+
+  // Public API
+
+  // 手动切到某一张背景图 (index: 0-3)
+  switchToBg(index) {
+    this._switchBg(index);
+    // 重置轮播计时器，从当前图片开始计
+    this._startBgRotation();
+  }
+
+  // 设置轮播间隔（秒），默认 60
+  setBgInterval(sec) {
+    this._bgInterval = Math.max(10, sec);
+    if (this._bgTimer) this._startBgRotation();
+  }
+
+  // 自定义情绪映射，如 setBgMoodMap({ energetic: 2, calm: 0 })
+  setBgMoodMap(map) {
+    Object.assign(this._bgMoodMap, map);
+  }
+
+  // 兼容旧 API：停止轮播并固定到单张图
+  setBgImage(path) {
+    this._stopBgRotation();
+    const img = new Image();
+    img.onload = () => {
+      this._bgPrevImage = this._bgImage;
+      this._bgImage = img;
+      this._bgImageIndex = -1;
+      this._bgImageDrawn = false;
+      this._bgFadeAlpha = 0;
+    };
+    img.onerror = () => console.warn(`[BG] 背景图加载失败: ${path}`);
+    img.src = path;
+  }
+
+  _resizeBgCanvas() {
+    if (!this.bgCanvas) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    this.bgCanvas.width = window.innerWidth * dpr;
+    this.bgCanvas.height = window.innerHeight * dpr;
+    this._bgCtx.setTransform(1, 0, 0, 1, 0, 0);
+    this._bgCtx.scale(dpr, dpr);
+    this._bgW = window.innerWidth;
+    this._bgH = window.innerHeight;
+    this._bgImageDrawn = false; // force re-compute image draw params
+  }
+
+  // 绘制背景图（cover 模式 + Ken Burns 动态 + 暗化遮罩 + 淡入淡出切换）
+  _drawBgImage(ctx, w, h) {
+    const img = this._bgImage;
+    if (!img) return;
+
+    // compute base cover crop params (cached until resize/switch)
+    if (!this._bgImageDrawn) {
+      const imgRatio = img.naturalWidth / img.naturalHeight;
+      const canvasRatio = w / h;
+      if (imgRatio > canvasRatio) {
+        this._bgDrawH = h;
+        this._bgDrawW = h * imgRatio;
+      } else {
+        this._bgDrawW = w;
+        this._bgDrawH = w / imgRatio;
+      }
+      this._bgDrawX = (w - this._bgDrawW) / 2;
+      this._bgDrawY = (h - this._bgDrawH) / 2;
+      this._bgImageDrawn = true;
+    }
+
+    // Ken Burns 效果：缓慢缩放 + 平移
+    const t = Date.now() / 1000;
+    const zoom = 1 + Math.sin(t * 0.08 + this._bgImageIndex * 1.2) * 0.04;
+    const panX = Math.sin(t * 0.06) * w * 0.025;
+    const panY = Math.cos(t * 0.07) * h * 0.02;
+    const zW = this._bgDrawW * zoom;
+    const zH = this._bgDrawH * zoom;
+    const zX = this._bgDrawX - (zW - this._bgDrawW) / 2 + panX;
+    const zY = this._bgDrawY - (zH - this._bgDrawH) / 2 + panY;
+
+    // 淡入淡出切换
+    if (this._bgPrevImage && this._bgFadeAlpha < 1) {
+      this._bgFadeAlpha += 0.008;
+      if (this._bgFadeAlpha >= 1) {
+        this._bgPrevImage = null;
+        ctx.drawImage(img, zX, zY, zW, zH);
+      } else {
+        // 前一张以相同 zoom/pan 绘制（保持画面连续）
+        if (this._bgPrevDrawW) {
+          const pzW = this._bgPrevDrawW * zoom;
+          const pzH = this._bgPrevDrawH * zoom;
+          const pzX = this._bgPrevDrawX - (pzW - this._bgPrevDrawW) / 2 + panX;
+          const pzY = this._bgPrevDrawY - (pzH - this._bgPrevDrawH) / 2 + panY;
+          ctx.drawImage(this._bgPrevImage, pzX, pzY, pzW, pzH);
+        }
+        ctx.save();
+        ctx.globalAlpha = this._bgFadeAlpha;
+        ctx.drawImage(img, zX, zY, zW, zH);
+        ctx.restore();
+      }
+    } else {
+      ctx.drawImage(img, zX, zY, zW, zH);
+    }
+
+    // 暗化遮罩：底色填充 + 渐变让图片融入暗色主题
+    ctx.fillStyle = 'rgba(5,5,10,0.45)';
+    ctx.fillRect(0, 0, w, h);
+
+    // 底部渐暗，让聊天输入区更突出
+    const bottomGrad = ctx.createLinearGradient(0, h * 0.6, 0, h);
+    bottomGrad.addColorStop(0, 'rgba(0,0,0,0)');
+    bottomGrad.addColorStop(1, 'rgba(0,0,0,0.4)');
+    ctx.fillStyle = bottomGrad;
+    ctx.fillRect(0, 0, w, h);
+  }
+
+  _drawBgActive() {
+    const ctx = this._bgCtx;
+    const w = this._bgW;
+    const h = this._bgH;
+    if (!ctx || !w || !h) return;
+
+    this._analyser.getByteFrequencyData(this._audioDataArray);
+    const data = this._audioDataArray;
+
+    const bass = data.slice(0, 6).reduce((a, v) => a + v, 0) / (6 * 255);
+    const mid  = data.slice(6, 40).reduce((a, v) => a + v, 0) / (34 * 255);
+    const high = data.slice(40).reduce((a, v) => a + v, 0) / (data.length - 40 || 1) / 255;
+    const t = Date.now() / 1000;
+
+    const style = getComputedStyle(document.documentElement);
+    const c1 = style.getPropertyValue('--wave-color-1').trim() || '#6db3e6';
+    const c2 = style.getPropertyValue('--wave-color-2').trim() || '#4a90c4';
+
+    ctx.clearRect(0, 0, w, h);
+
+    // ── Layer 0: Background image ──
+    this._drawBgImage(ctx, w, h);
+
+    // ── Layer 1: Aurora bands ──
+    ctx.save();
+    ctx.globalAlpha = 0.08 + bass * 0.1;
+    const bands = 4;
+    for (let i = 0; i < bands; i++) {
+      const baseY = (h / (bands + 1)) * (i + 1);
+      const oscillation = Math.sin(t * 0.3 + i * 1.8) * 40 * (1 + bass);
+      const cy = baseY + oscillation;
+      const rx = w * 0.65 + mid * w * 0.2;
+      const ry = h / (bands + 2) + bass * h * 0.15;
+
+      const grad = ctx.createRadialGradient(w * 0.4, cy, 0, w * 0.4, cy, rx);
+      const alpha = 0.12 + mid * 0.18;
+      grad.addColorStop(0, this._hexToRgba(c1, alpha));
+      grad.addColorStop(0.6, this._hexToRgba(c2, alpha * 0.4));
+      grad.addColorStop(1, 'rgba(0,0,0,0)');
+
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.ellipse(w * 0.4, cy, rx, ry, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // ── Layer 2: Particles ──
+    this._drawBgParticles(ctx, w, h, bass, mid, high, t, c1, c2);
+
+    // ── Layer 3: Vignette ──
+    const vignette = ctx.createRadialGradient(w * 0.5, h * 0.5, w * 0.35, w * 0.5, h * 0.5, w * 0.75);
+    vignette.addColorStop(0, 'rgba(0,0,0,0)');
+    vignette.addColorStop(1, 'rgba(0,0,0,0.35)');
+    ctx.fillStyle = vignette;
+    ctx.fillRect(0, 0, w, h);
+  }
+
+  _drawBgIdle() {
+    const ctx = this._bgCtx;
+    const w = this._bgW;
+    const h = this._bgH;
+    if (!ctx || !w || !h) return;
+
+    const t = Date.now() / 1000;
+    ctx.clearRect(0, 0, w, h);
+
+    // ── Layer 0: Background image ──
+    this._drawBgImage(ctx, w, h);
+
+    const style = getComputedStyle(document.documentElement);
+    const c1 = style.getPropertyValue('--wave-color-1').trim() || '#6db3e6';
+
+    // ── Layer 1: slow breathing ellipse ──
+    const breath = Math.sin(t * 0.5) * 0.5 + 0.5;
+    const radius = w * 0.35 + breath * w * 0.15;
+    const alpha = 0.03 + breath * 0.05;
+
+    const grad = ctx.createRadialGradient(w * 0.5, h * 0.45, 0, w * 0.5, h * 0.45, radius);
+    grad.addColorStop(0, this._hexToRgba(c1, alpha));
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+
+    // ── Layer 2: idle particles ──
+    if (this._bgParticles.length > 0) {
+      ctx.save();
+      for (const p of this._bgParticles) {
+        p.y -= p.speed * 0.12;
+        p.x += Math.sin(t * 0.3 + p.phase) * 0.15;
+        if (p.y < -10) { p.y = h + 10; p.x = Math.random() * w; }
+        if (p.x < -10) p.x = w + 10;
+        if (p.x > w + 10) p.x = -10;
+
+        ctx.beginPath();
+        ctx.fillStyle = this._hexToRgba(c1, 0.06 + breath * 0.06);
+        ctx.arc(p.x, p.y, p.r * 0.7, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+
+  _hexToRgba(hex, alpha) {
+    if (!hex) return `rgba(109,179,230,${alpha.toFixed(3)})`;
+    if (hex.startsWith('rgba') || hex.startsWith('rgb(')) {
+      return hex.replace(/[\d.]+\)$/, `${alpha})`);
+    }
+    let r, g, b;
+    const h = hex.replace('#', '');
+    if (h.length === 3) {
+      r = parseInt(h[0] + h[0], 16);
+      g = parseInt(h[1] + h[1], 16);
+      b = parseInt(h[2] + h[2], 16);
+    } else {
+      r = parseInt(h.slice(0, 2), 16);
+      g = parseInt(h.slice(2, 4), 16);
+      b = parseInt(h.slice(4, 6), 16);
+    }
+    if (isNaN(r)) return `rgba(109,179,230,${alpha.toFixed(3)})`;
+    return `rgba(${r},${g},${b},${alpha.toFixed(3)})`;
+  }
+
   _initWaveCanvas() {
     if (!this.waveCanvas) return;
     this._waveCtx = this.waveCanvas.getContext('2d');
@@ -1647,8 +2038,9 @@ class KimmelodyApp {
   _startWaveLoop() {
     const draw = () => {
       this._animFrameId = requestAnimationFrame(draw);
-      if (!this._waveCtx) return;
 
+      // ── Wave visualizer (foreground) ──
+      if (!this._waveCtx) return;
       if (this._audioCtxReady && this.state.isPlaying && this._analyser) {
         this._drawFrequencyBars();
       } else {
@@ -1673,8 +2065,8 @@ class KimmelodyApp {
     const gap = (w / barCount) * 0.3;
 
     const style = getComputedStyle(document.documentElement);
-    const color1 = style.getPropertyValue('--wave-color-1').trim() || '#a78bfa';
-    const color2 = style.getPropertyValue('--wave-color-2').trim() || '#7c5cbf';
+    const color1 = style.getPropertyValue('--wave-color-1').trim() || '#6db3e6';
+    const color2 = style.getPropertyValue('--wave-color-2').trim() || '#4a90c4';
 
     for (let i = 0; i < barCount; i++) {
       let sum = 0;
@@ -1705,7 +2097,7 @@ class KimmelodyApp {
     ctx.clearRect(0, 0, w, h);
 
     const style = getComputedStyle(document.documentElement);
-    const color1 = style.getPropertyValue('--wave-color-1').trim() || '#a78bfa';
+    const color1 = style.getPropertyValue('--wave-color-1').trim() || '#6db3e6';
 
     ctx.beginPath();
     ctx.strokeStyle = color1;
@@ -1731,6 +2123,11 @@ class KimmelodyApp {
     moods.forEach(m => this.radioView.classList.remove(`chat-mood-${m}`));
     if (moods.includes(mood)) {
       this.radioView.classList.add(`chat-mood-${mood}`);
+    }
+    // 根据情绪切换背景图
+    if (this._bgMoodMap && mood in this._bgMoodMap) {
+      this._switchBg(this._bgMoodMap[mood]);
+      this._startBgRotation(); // 切换后重置轮播计时器
     }
   }
 

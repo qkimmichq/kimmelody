@@ -62,20 +62,17 @@ export class Executor {
       return { songs: [], ttsUrl: null, say: say || '暂时没有找到可以播放的音乐，稍后再试试吧' };
     }
 
-    // 2. TTS 合成播报
-    let ttsResult = null;
-    try {
-      ttsResult = await this.tts.synthesize(say, scene);
-    } catch (err) {
-      console.warn(`[Executor] TTS 失败: ${err.message}`);
-    }
-
-    // 3. 设置当前会话
+    // 2. 设置当前会话并立即广播（不等 TTS，让歌曲先播放）
     const session = {
       songs,
       currentIndex: 0,
       currentSong: songs[0],
-      ttsUrl: ttsResult?.url || null,
+      ttsUrl: null,
+      ttsText: say,
+      ttsWords: [],
+      segueTtsUrl: null,
+      segueTtsText: segue || null,
+      segueTtsWords: [],
       sayText: say,
       segueText: segue,
       scene,
@@ -85,11 +82,13 @@ export class Executor {
     this.state.setCurrentSession(session);
     this.state.setQueue(songs);
 
-    // 4. 触发预加载
     this.preloader?.onSongChange(0, songs);
 
-    // 5. WS 推送
+    // 先推送歌曲信息，让前端立即开始播放音乐
     this._broadcast(session, 'song:change');
+
+    // 3. TTS 在后台合成，完成后通过 tts:ready 推送给前端
+    this._synthesizeInBackground(say, segue, scene, session);
 
     // 6. 记录历史
     const now = new Date();
@@ -119,7 +118,33 @@ export class Executor {
       });
     }
 
-    return { songs, ttsUrl: ttsResult?.url || null };
+    return { songs, ttsUrl: null };
+  }
+
+  // 后台合成 TTS，完成后通过 WS 推送 tts:ready
+  async _synthesizeInBackground(say, segue, scene, session) {
+    try {
+      const [ttsResult, segueTtsResult] = await Promise.all([
+        this.tts.synthesize(say, scene),
+        segue ? this.tts.synthesize(segue, scene).catch(() => null) : Promise.resolve(null),
+      ]);
+
+      if (ttsResult?.url) {
+        session.ttsUrl = ttsResult.url;
+        session.ttsText = ttsResult.text || say;
+        session.ttsWords = ttsResult.words || [];
+      }
+      if (segueTtsResult?.url) {
+        session.segueTtsUrl = segueTtsResult.url;
+        session.segueTtsText = segueTtsResult.text || segue;
+        session.segueTtsWords = segueTtsResult.words || [];
+      }
+
+      this.state.setCurrentSession(session);
+      this._broadcast({ ttsUrl: session.ttsUrl, segueTtsUrl: session.segueTtsUrl }, 'tts:ready');
+    } catch (err) {
+      console.warn(`[Executor] TTS 后台合成失败: ${err.message}`);
+    }
   }
 
   // ── 歌手名模糊匹配 ──
